@@ -1,0 +1,79 @@
+name: Deploy WordPress to GCP
+
+on:
+  push:
+    branches:
+      - main  # Deploy when changes are pushed to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Checkout the code
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    # 2. Setup gcloud CLI
+    - name: Set up gcloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        service_account_key: ${{ secrets.GCP_CREDENTIALS }}
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+    # 3. Authenticate kubectl with GKE
+    - name: Authenticate kubectl with GKE
+      run: |
+        gcloud container clusters get-credentials darlwordpresskube --region us-east1
+
+    # 4. Create Kubernetes StorageClass and PersistentVolumeClaim
+    - name: Apply Kubernetes Configurations
+      run: |
+        cat <<EOF > wppv.yaml
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: custom-standard
+        provisioner: kubernetes.io/gce-pd
+        volumeBindingMode: WaitForFirstConsumer
+        EOF
+
+        kubectl apply -f wppv.yaml
+
+        cat <<EOF > wppvc.yaml
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: wordpress-pvc
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: custom-standard
+        EOF
+
+        kubectl apply -f wppvc.yaml
+
+    # 5. Install Helm and Deploy WordPress
+    - name: Install Helm and Deploy WordPress
+      run: |
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        helm install my-release bitnami/wordpress \
+          --set persistence.storageClass=custom-standard \
+          --set persistence.size=10Gi \
+          --set mariadb.persistence.storageClass=custom-standard \
+          --set mariadb.persistence.size=10Gi
+
+    # 6. Retrieve External IP and Admin Password
+    - name: Retrieve WordPress Access Info
+      run: |
+        echo "Waiting for LoadBalancer to provision external IP..."
+        sleep 60  # Wait for the external IP to be provisioned
+        EXTERNAL_IP=$(kubectl get svc my-release-wordpress -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        PASSWORD=$(kubectl get secret my-release-wordpress -o jsonpath="{.data.wordpress-password}" | base64 -d)
+        echo "WordPress is available at: http://$EXTERNAL_IP"
+        echo "Admin Login: http://$EXTERNAL_IP/wp-admin"
+        echo "Username: user"
+        echo "Password: $PASSWORD"
